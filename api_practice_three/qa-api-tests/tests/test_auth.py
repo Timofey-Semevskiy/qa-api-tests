@@ -86,3 +86,4 @@ def test_user_crud():
     # 4. Проверяем, что пользователя нету
     resp = httpx.get(f"{BASE_URL}/api/v1/users/{user_id}")
     assert resp.status_code == 404
+
