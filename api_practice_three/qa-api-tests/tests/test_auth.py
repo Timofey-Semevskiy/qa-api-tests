@@ -1,115 +1,138 @@
 import httpx
 import pytest
-import time
 
-BASE_URL = 'http://localhost:8000'
+def find_token(obj):
+    if isinstance(obj, dict):
+        for value in obj.values():
+            found = find_token(value)
+            if found:
+                return found
+    elif isinstance(obj, str) and obj.count(".") == 2:
+        return obj
+    return None
 
+def get_token(http_client,email,password):
+    resp = http_client.post("/api/v1/authentication/login",
+                            json={"email": email, "password": password})
+    assert resp.status_code == 200
+    token = find_token(resp.json())
+    # Если нету токена показываем весь ответ
+    assert token is not None , f"Токен не найден в ответе: {resp.json()}"
+    return token
 
 @pytest.mark.parametrize("email, password, expected", [
-    ("a@b.c", "123", 200),        # валидные данные → 200
-    ("bad-email", "123", 422),    # битый email → 422
+    ("bad-email", "123", 422),  # битый формат email → 422
+    ("a@b.c", "", 401),         # пустой пароль → 401
 ])
-def test_login_data(email, password, expected):
-    resp = httpx.post(f"{BASE_URL}/api/v1/authentication/login",
-                      json={"email": email, "password": password})
+def test_login_bad_data(http_client, email, password, expected):
+    resp = http_client.post("/api/v1/authentication/login",
+                            json={"email": email, "password": password})
     assert resp.status_code == expected
 
 
-def test_unknown_route():
-    # несуществующий маршрут → 404
-    resp = httpx.get(f"{BASE_URL}/api/v1/does-not-exist")
-    assert resp.status_code == 404
+def test_login_success(http_client, created_user):
+    # логинимся юзером, которого только что создали
+    email, password = created_user
+    resp = http_client.post("/api/v1/authentication/login",
+                            json={"email": email, "password": password})
+    assert resp.status_code == 200
+    # в ответе должен быть JWT
+    assert find_token(resp.json()) is not None
 
 
-def test_wrong_method_on_login():
-    # GET на эндпоинт, где только POST → 405
-    resp = httpx.get(f"{BASE_URL}/api/v1/authentication/login")
-    assert resp.status_code == 405
-
-def test_login_empty_password():
-    # пустой password → не проходит авторизацию → 401
-    resp = httpx.post(f"{BASE_URL}/api/v1/authentication/login",
-                      json={"email": "a@b.c", "password": ""})
-    assert resp.status_code == 401
+def test_login_wrong_password(http_client, created_user):
+    email, _ = created_user
+    resp = http_client.post("/api/v1/authentication/login",
+                            json={"email": email, "password": "wrong_pass"})
+    assert resp.status_code == 401  # юзер есть, пароль нет → 401, не 422
 
 
-@pytest.mark.parametrize("method, url, expected", [
-    ("GET", f"{BASE_URL}/api/v1/does-not-exist", 404),
-    ("GET", f"{BASE_URL}/api/v1/authentication/login", 405),
-    ("PUT", f"{BASE_URL}/api/v1/authentication/login", 405),
+# ---------- Ошибки запросов ----------
+
+@pytest.mark.parametrize("method, path, expected", [
+    ("GET", "/api/v1/does-not-exist", 404),
+    ("GET", "/api/v1/authentication/login", 405),
+    ("PUT", "/api/v1/authentication/login", 405),
 ])
-def test_bad_requests(method, url, expected):
+def test_bad_requests(http_client, method, path, expected):
     # httpx.request принимает метод как строку
-    resp = httpx.request(method, url)
+    resp = http_client.request(method, path)
     assert resp.status_code == expected
 
 
+# ---------- Создание юзера ----------
 
-def test_create_user():
+def test_create_user(http_client, test_email, test_password):
     payload = {
-        "email": f"test{time.time()}@test.com",  # уникальный email
-        "password": "Password123",
+        "email": test_email,
+        "password": test_password,
         "firstName": "Tim",
         "lastName": "Sev",
-        "middleName": "Test"
+        "middleName": "Test",
     }
-    resp = httpx.post(f"{BASE_URL}/api/v1/users", json=payload)
+    resp = http_client.post("/api/v1/users", json=payload)
     assert resp.status_code == 200
     data = resp.json()
     # поля лежат в обёртке user
-    assert data["user"]["email"] == payload["email"]
+    assert data["user"]["email"] == test_email
     assert data["user"]["firstName"] == "Tim"
     assert "id" in data["user"]
 
 
+# ---------- CRUD ----------
 
-def test_user_crud():
-    payload = {
-        "email": f"test{time.time()}@test.com",
-        "password": "Password123",
+def test_user_crud(http_client, test_email, test_password):
+    # CREATE
+    resp = http_client.post("/api/v1/users", json={
+        "email": test_email,
+        "password": test_password,
         "firstName": "Tim",
         "lastName": "Sev",
-        "middleName": "Test"
-    }
-    resp = httpx.post(f"{BASE_URL}/api/v1/users", json=payload)
+        "middleName": "Test",
+    })
     assert resp.status_code == 200
-
-
     user_id = resp.json()["user"]["id"]
 
-
-    resp = httpx.delete(f"{BASE_URL}/api/v1/users/{user_id}")
+    # DELETE — защищён, нужен токен
+    token = get_token(http_client, test_email, test_password)
+    resp = http_client.delete(f"/api/v1/users/{user_id}",
+                              headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
 
-    resp = httpx.get(f"{BASE_URL}/api/v1/users/{user_id}")
+    # VERIFY: юзера больше нет
+    resp = http_client.get(f"/api/v1/users/{user_id}",
+                           headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 404
 
-def get_token(email="a@b.c", password="123"):
-    """Помощник: логинимся и возвращаем токен."""
-    resp = httpx.post(f"{BASE_URL}/api/v1/authentication/login",
-                      json={"email": email, "password": password})
-    assert resp.status_code == 200
-    return resp.json()["access_token"]
 
-def test_protected_endpoint_with_token():
-    token = get_token()
-    headers = {"Authorization": f"Bearer {token}"}
-    resp = httpx.get(f"{BASE_URL}/api/v1/users/me", headers=headers)  # ← защищённый эндпоинт из Swagger
+# ---------- Защищённые эндпоинты ----------
+
+def test_protected_endpoint_with_token(http_client, created_user):
+    email, password = created_user
+    token = get_token(http_client, email, password)
+    resp = http_client.get("/api/v1/users/me",
+                           headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
 
 
-def test_protected_endpoint_without_token():
-    resp = httpx.get(f"{BASE_URL}/api/v1/users/me")
+def test_protected_endpoint_without_token(http_client):
+    # без токена → 401 (тест ловит, если защиту отключат)
+    resp = http_client.get("/api/v1/users/me")
     assert resp.status_code == 401
 
 
-def test_protected_endpoint_bad_token():
-    headers = {"Authorization": "Bearer garbage_token_123"}
-    resp = httpx.get(f"{BASE_URL}/api/v1/users/me", headers=headers)
+def test_protected_endpoint_bad_token(http_client):
+    # мусорный токен → тоже 401 (тест ловит, если проверку токена сломают)
+    resp = http_client.get("/api/v1/users/me",
+                           headers={"Authorization": "Bearer garbage_token_123"})
     assert resp.status_code == 401
 
 
-def test_print_login_response():
-    resp = httpx.post(f"{BASE_URL}/api/v1/authentication/login",
-                      json={"email": "a@b.c", "password": "123"})
+# ---------- Отладка ----------
+
+def test_print_login_response(http_client, created_user):
+    # дебаг: печатает всю структуру ответа login (запускать с -s)
+    email, password = created_user
+    resp = http_client.post("/api/v1/authentication/login",
+                            json={"email": email, "password": password})
     print(resp.json())
