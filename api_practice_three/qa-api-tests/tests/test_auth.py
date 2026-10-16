@@ -31,12 +31,11 @@ def test_login_bad_data(http_client, email, password, expected):
 
 
 def test_login_success(http_client, created_user):
-    # логинимся юзером, которого только что создали
     email, password = created_user
     resp = http_client.post("/api/v1/authentication/login",
                             json={"email": email, "password": password})
     assert resp.status_code == 200
-    # в ответе должен быть JWT
+ 
     assert find_token(resp.json()) is not None
 
 
@@ -47,7 +46,7 @@ def test_login_wrong_password(http_client, created_user):
     assert resp.status_code == 401  # юзер есть, пароль нет → 401, не 422
 
 
-# ---------- Ошибки запросов ----------
+
 
 @pytest.mark.parametrize("method, path, expected", [
     ("GET", "/api/v1/does-not-exist", 404),
@@ -55,12 +54,11 @@ def test_login_wrong_password(http_client, created_user):
     ("PUT", "/api/v1/authentication/login", 405),
 ])
 def test_bad_requests(http_client, method, path, expected):
-    # httpx.request принимает метод как строку
+
     resp = http_client.request(method, path)
     assert resp.status_code == expected
 
 
-# ---------- Создание юзера ----------
 
 def test_create_user(http_client, test_email, test_password):
     payload = {
@@ -82,7 +80,6 @@ def test_create_user(http_client, test_email, test_password):
 # ---------- CRUD ----------
 
 def test_user_crud(http_client, test_email, test_password):
-    # CREATE
     resp = http_client.post("/api/v1/users", json={
         "email": test_email,
         "password": test_password,
@@ -93,19 +90,15 @@ def test_user_crud(http_client, test_email, test_password):
     assert resp.status_code == 200
     user_id = resp.json()["user"]["id"]
 
-    # DELETE — защищён, нужен токен
     token = get_token(http_client, test_email, test_password)
     resp = http_client.delete(f"/api/v1/users/{user_id}",
                               headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
 
-    # VERIFY: юзера больше нет
     resp = http_client.get(f"/api/v1/users/{user_id}",
                            headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 404
 
-
-# ---------- Защищённые эндпоинты ----------
 
 def test_protected_endpoint_with_token(http_client, created_user):
     email, password = created_user
@@ -116,23 +109,143 @@ def test_protected_endpoint_with_token(http_client, created_user):
 
 
 def test_protected_endpoint_without_token(http_client):
-    # без токена → 401 (тест ловит, если защиту отключат)
     resp = http_client.get("/api/v1/users/me")
     assert resp.status_code == 401
 
 
 def test_protected_endpoint_bad_token(http_client):
-    # мусорный токен → тоже 401 (тест ловит, если проверку токена сломают)
     resp = http_client.get("/api/v1/users/me",
                            headers={"Authorization": "Bearer garbage_token_123"})
     assert resp.status_code == 401
 
 
-# ---------- Отладка ----------
+
 
 def test_print_login_response(http_client, created_user):
-    # дебаг: печатает всю структуру ответа login (запускать с -s)
+
     email, password = created_user
     resp = http_client.post("/api/v1/authentication/login",
                             json={"email": email, "password": password})
     print(resp.json())
+
+
+def test_login_unknown_user(http_client):
+   
+    resp = http_client.post(
+        "/api/v1/authentication/login",
+        json={"email": "ghost@test.com", "password": "Password123"}
+    )
+    assert resp.status_code == 401
+
+
+def test_login_empty_body(http_client):
+
+    resp = http_client.post("/api/v1/authentication/login")
+    assert resp.status_code == 422
+
+
+def test_double_login(http_client, created_user):
+
+    email, password = created_user
+    for _ in range(2):
+        resp = http_client.post(
+            "/api/v1/authentication/login",
+            json={"email": email, "password": password}
+        )
+        assert resp.status_code == 200
+
+
+
+
+def test_create_user_duplicate(http_client, test_email, test_password):
+ 
+    payload = {
+        "email": test_email,
+        "password": test_password,
+        "firstName": "Tim",
+        "lastName": "Sev",
+    }
+    assert http_client.post("/api/v1/users", json=payload).status_code == 200
+    resp = http_client.post("/api/v1/users", json=payload)
+    assert resp.status_code == 409
+
+
+def test_create_user_missing_first_name(http_client, test_email, test_password):
+    resp = http_client.post("/api/v1/users", json={
+        "email": test_email,
+        "password": test_password,
+        "lastName": "Sev",
+    })
+    assert resp.status_code == 422
+
+
+def test_create_user_empty_email(http_client, test_password):
+    resp = http_client.post("/api/v1/users", json={
+        "email": "",
+        "password": test_password,
+        "firstName": "Tim",
+        "lastName": "Sev",
+    })
+    assert resp.status_code == 422
+
+
+
+def test_get_user_by_id_with_token(http_client, test_email, test_password):
+    resp = http_client.post("/api/v1/users", json={
+        "email": test_email,
+        "password": test_password,
+        "firstName": "Tim",
+        "lastName": "Sev",
+    })
+    user_id = resp.json()["user"]["id"]
+    token = get_token(http_client, test_email, test_password)
+    resp = http_client.get(
+        f"/api/v1/users/{user_id}",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["email"] == test_email
+
+
+def test_get_user_by_id_without_token(http_client, test_email, test_password):
+    resp = http_client.post("/api/v1/users", json={
+        "email": test_email,
+        "password": test_password,
+        "firstName": "Tim",
+        "lastName": "Sev",
+    })
+    user_id = resp.json()["user"]["id"]
+    resp = http_client.get(f"/api/v1/users/{user_id}")
+    assert resp.status_code == 401
+
+
+def test_get_nonexistent_user(http_client, created_user):
+    email, password = created_user
+    token = get_token(http_client, email, password)
+    resp = http_client.get(
+        "/api/v1/users/999999999",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 404
+
+
+
+
+def test_me_returns_token_owner_data(http_client, test_email, test_password):
+    # два разных юзера: токен второго → /me отдаёт данные ВТОРОГО, не первого
+    second_email = f"second{time.time()}@test.com"
+    payload = {
+        "email": second_email,
+        "password": test_password,
+        "firstName": "Other",
+        "lastName": "Person",
+    }
+    resp = http_client.post("/api/v1/users", json=payload)
+    assert resp.status_code == 200
+    token = get_token(http_client, second_email, test_password)
+    resp = http_client.get(
+        "/api/v1/users/me",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["email"] == second_email
